@@ -1,0 +1,17 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.17    
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # API REST/Web UI
+      - "6334:6334"   # API gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:            
+      QDRANT__STORAGE__PATH: "/qdrant/storage"
+      RUN_MODE: dev
+
+volumes:
+  qdrant_data:
+    driver: local

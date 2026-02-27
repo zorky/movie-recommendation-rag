@@ -3,10 +3,10 @@ from functools import lru_cache
 import json
 import ollama
 from qdrant_client import QdrantClient, models
-from qdrant_client.models import ScoredPoint
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import streamlit as st
 import uuid
+import torch
 
 # Configuration
 QDRANT_HOST = "localhost"
@@ -15,58 +15,44 @@ COLLECTION_NAME = "movies"
 MODEL_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 MODEL_DIMENSION = 384
 MODEL_RERANKING = "BAAI/bge-reranker-v2-m3"
-# MODEL_RERANKING = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 LLM_API = "http://localhost:11434/v1"
 MODEL_LLM = "mistral"
 MAX_TOKENS = 500
 TEMPERATURE = 0.3
 TOP_P = 0.9
 
-@dataclass
-class RerankedScoredPoint:
-    scored_point: ScoredPoint  # Le point original avec le nouveau score reranké
-    original_score: float  # Le score original de Qdrant
-
-@dataclass
-class RerankerResult:
-    """Résultats après reranking"""
-    reranked_points: list[RerankedScoredPoint]  # nouveaux points avec scores rerankés
-    original_points: list[ScoredPoint]  # points originaux avant reranking
-
+# available_rerankers = {
+#     "BAAI/bge-reranker-v2-m3": "BAAI/bge-reranker-v2-m3",
+#     "cross-encoder/ms-marco-MiniLM-L-6-v2": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+# }
+# selected_reranker = st.selectbox("Choose reranking model", options=list(available_rerankers.keys()))
+# MODEL_RERANKING = available_rerankers[selected_reranker]
 
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(MODEL_EMBEDDING)
 
-embedding_model = load_embedding_model()
-
 @st.cache_resource
-def load_cross_encoder_model():    
+def load_cross_encoder_model():
     def _get_device_cpu_gpu() -> str:
-        import torch
         if torch.cuda.is_available():
-            gpu_name = torch.cuda.get_device_name(0)            
-            return gpu_name
-            # return "cuda"
+            # gpu_name = torch.cuda.get_device_name(0)
+            # st.info(f"Using GPU: {gpu_name}")
+            return "cuda"
+        # st.info("Using CPU for reranking.")
         return "cpu"
-    
-    return CrossEncoder(MODEL_RERANKING,
-                        device=_get_device_cpu_gpu())
+    # st.info(f"Loading reranking model '{MODEL_RERANKING}'...")
+    return CrossEncoder(MODEL_RERANKING, device=_get_device_cpu_gpu())
 
+embedding_model = load_embedding_model()
 reranking_model = load_cross_encoder_model()
 
 def rerank(query, documents):
     BATCH_SIZE = 25
-    print(f"Reranking {documents} documents with model '{MODEL_RERANKING}' on device '{reranking_model.device}'...")
+    # st.info(f"Reranking {len(documents)} documents with model '{MODEL_RERANKING}'...")
     query_document_pairs = [(query, doc) for doc in documents]
-    _scores = reranking_model.predict(query_document_pairs,
-                                   batch_size=BATCH_SIZE,
-                                   apply_softmax=False, # si le modèle n'était pas normalisé entre 0 et 1 (probas)
-                                   show_progress_bar=False)
-    print(f"Reranking scores: {_scores}")
-    _ranked_results = list(zip(documents, _scores))
-    _ranked_results.sort(key=lambda x: x[1], reverse=True)
-    return _ranked_results
+    scores = reranking_model.predict(query_document_pairs, batch_size=BATCH_SIZE, apply_softmax=False)
+    return list(zip(documents, scores))
 
 @st.cache_data
 def load_movies(file_path="data/data.json"):
@@ -80,29 +66,26 @@ def initialize_qdrant():
     collection_exists = any(col.name == COLLECTION_NAME for col in collections)
 
     if not collection_exists:
-        print("Creating collection and indexing movies...")
+        st.info("Creating collection and indexing movies...")
         create_collection(client, COLLECTION_NAME)
         movies = load_movies()
         index_movies(movies, client, collection_name=COLLECTION_NAME)
     else:
-        print("The movie index already exists. It was not regenerated.")
+        st.info("The movie index already exists.")
 
     return client
 
 def generate_uuid(imdb_id):
-    return str(uuid.uuid5(uuid.uuid5(uuid.NAMESPACE_DNS, imdb_id)))
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, imdb_id))
 
 def create_collection(client, collection_name=COLLECTION_NAME):
     existing_collections = [c.name for c in client.get_collections().collections]
     if collection_name not in existing_collections:
         client.create_collection(
             collection_name=collection_name,
-            vectors_config=models.VectorParams(
-                size=MODEL_DIMENSION,
-                distance=models.Distance.COSINE,
-            ),
+            vectors_config=models.VectorParams(size=MODEL_DIMENSION, distance=models.Distance.COSINE),
         )
-        print(f"Collection '{collection_name}' created.")
+        st.info(f"Collection '{collection_name}' created.")
 
 def index_movies(movies, client, collection_name=COLLECTION_NAME):
     points = []
@@ -119,16 +102,34 @@ def index_movies(movies, client, collection_name=COLLECTION_NAME):
             )
         )
     client.upsert(collection_name=collection_name, points=points)
-    print("Data indexed in Qdrant.")
+    st.info("Data indexed in Qdrant.")
 
-def perform_query(client, query, collection_name=COLLECTION_NAME):
+def perform_query_and_rerank(client, query, collection_name=COLLECTION_NAME):
     query_vector = embedding_model.encode(query).tolist()
-    results = client.query_points(
-        collection_name=collection_name,
-        query=query_vector,
-        limit=3,
-    )
-    return results.points
+    results = client.query_points(collection_name=collection_name, query=query_vector, limit=3)
+    points = results.points
+
+    if not points:
+        return []
+
+    documents = [point.payload["plot"] for point in points]
+    plot_to_point = {point.payload["plot"]: point for point in points}
+    reranked_pairs = rerank(query, documents)
+
+    reranked_points = []
+    for text, score in reranked_pairs:
+        point = plot_to_point[text]
+        reranked_points.append(
+            models.ScoredPoint(
+                id=point.id,
+                payload=point.payload,
+                vector=point.vector,
+                score=score,
+                version=point.version if hasattr(point, "version") else None,
+            )
+        )
+
+    return reranked_points
 
 def generate_prompt(context, query):
     return f"""
@@ -148,11 +149,24 @@ def query_ollama(prompt, model_name=MODEL_LLM):
     response = client.chat(model_name, messages=[{"role": "user", "content": prompt}])
     return response["message"]["content"]
 
+@st.cache_data()
+def cached_query_ollama(prompt, model_name=MODEL_LLM, temperature=TEMPERATURE, top_p=TOP_P, max_tokens=MAX_TOKENS):
+    """Version cacheable de query_ollama, utilisant prompt, model_name, temperature, top_p et max_tokens comme clé de cache."""
+    client = ollama.Client(host="http://localhost:11434")
+    response = client.chat(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        options={
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+    )
+    return response["message"]["content"]
+
 def main():
     if "qdrant_client" not in st.session_state:
         st.session_state.qdrant_client = initialize_qdrant()
 
-    # Gestion des états
     if "results" not in st.session_state:
         st.session_state.results = None
     if "response" not in st.session_state:
@@ -168,74 +182,53 @@ def main():
     #   a serie with drugs
     query = st.text_input("Ask for a movie about...", "a wormhole in space")
 
-    # Layout pour le checkbox et le bouton
     col_inference, col_button = st.columns([1, 1])
     with col_inference:
         st.session_state.do_inference = st.checkbox("Inference", value=st.session_state.do_inference)
-
     with col_button:
         st.write("")
         ask = st.button("Ask")
 
-    # Action uniquement si le bouton est cliqué
-    st.session_state.results = None
-    if ask and query:  
-        with st.spinner("Searching imb..."):              
-            points = perform_query(st.session_state.qdrant_client, query)            
-            print(f"Search results: {points}")            
-            if points:                
-                _documents = [
-                        f"{r.payload['plot']}"
-                        for r in points
-                ]
-                _results = rerank(query, _documents)
-                print(f"Reranking scores: {_results}")
+    if ask and query:
+        with st.spinner("Searching..."):
+            try:
+                st.session_state.results = perform_query_and_rerank(st.session_state.qdrant_client, query)
+            except Exception as e:
+                st.error(f"Error during reranking: {e}")
+                st.session_state.results = None
 
-                reranked_points = []            
-                for _, (text, score) in enumerate(_results):
-                    for point in points:
-                        if point.payload.get("plot", "") == text:
-                            new_point = models.ScoredPoint(
-                                id=point.id,
-                                payload=point.payload,
-                                vector=point.vector,
-                                score=score,
-                                version=point.version if hasattr(point, "version") else None,
-                            )
-                            reranked_points.append(
-                                RerankedScoredPoint(scored_point=new_point, original_score=point.score)
-                            )
-                            break
-                
-                # reranker_results = RerankerResult(reranked_points=reranked_points, original_points=points)
-
-                st.subheader("Movies Found")
-                st.session_state.results = reranked_points
-                for result in st.session_state.results:
-                    payload = result.scored_point.payload
-                    st.markdown(f"**{payload['title']}** ({payload['year']}) — reranked score: `{result.scored_point.score:.2f}` (original score: `{result.original_score:.2f}`)")
-                    st.write(payload["plot"])
-                    st.divider()                
-
-        if st.session_state.do_inference:
-            context = ""
-            for result in st.session_state.results:
-                payload = result.scored_point.payload
-                context += f"\n- {payload['title']}: {payload['plot']}"
-            print(f"Context for prompt:\n{context}")
+        if st.session_state.do_inference and st.session_state.results:
+            context = "\n".join([f"- {r.payload['title']}: {r.payload['plot']}" for r in st.session_state.results])
             st.session_state.prompt = generate_prompt(context, query)
-            print(f"Prompt sent to Ollama:\n{st.session_state.prompt}")
+            with st.spinner("Generating recommendation..."):
+                try:
+                    st.session_state.response = cached_query_ollama(
+                        st.session_state.prompt,
+                        model_name=MODEL_LLM,
+                        temperature=TEMPERATURE,
+                        top_p=TOP_P,
+                        max_tokens=MAX_TOKENS
+                    )
+                except Exception as e:
+                    st.error(f"Error during inference: {e}")
+                    st.session_state.response = None
 
-            with st.spinner("Searching..."):
-                st.session_state.response = query_ollama(st.session_state.prompt)
-        else:
-            st.session_state.response = None
+    if st.session_state.results:
+        st.subheader("Movies Found")
+        for result in st.session_state.results:
+            payload = result.payload
+            st.markdown(f"**{payload['title']}** ({payload['year']})")
+            # st.markdown(f"**{payload['title']}** ({payload['year']}) — reranked score: `{result.score:.2f}` original score: `{result.score:.2f}`")
+            st.write(payload["plot"])
+            st.divider()    
 
-    if st.session_state.do_inference and st.session_state.prompt and st.session_state.response:
-        st.subheader("Prompt Sent to Ollama")
-        st.text_area("Here is the prompt sent to Ollama", st.session_state.prompt, height=200)
+    if st.session_state.response:
         st.subheader("Ollama's Recommendation")
         st.write(st.session_state.response)
+
+    if st.session_state.prompt:
+        st.subheader("Prompt Sent to Ollama")
+        st.text_area("Here is the prompt sent to Ollama", st.session_state.prompt, height=200)
 
 if __name__ == "__main__":
     main()

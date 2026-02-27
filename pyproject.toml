@@ -12,4 +12,14 @@ dependencies = [
     "qdrant-client>=1.16.2",
     "sentence-transformers>=5.2.0",
     "streamlit>=1.52.2",
+    # Torch GPU
+    "torch==2.6.0+cu126",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
