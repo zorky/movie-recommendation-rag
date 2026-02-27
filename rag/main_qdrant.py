@@ -21,13 +21,6 @@ MAX_TOKENS = 500
 TEMPERATURE = 0.3
 TOP_P = 0.9
 
-# available_rerankers = {
-#     "BAAI/bge-reranker-v2-m3": "BAAI/bge-reranker-v2-m3",
-#     "cross-encoder/ms-marco-MiniLM-L-6-v2": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-# }
-# selected_reranker = st.selectbox("Choose reranking model", options=list(available_rerankers.keys()))
-# MODEL_RERANKING = available_rerankers[selected_reranker]
-
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(MODEL_EMBEDDING)
@@ -36,12 +29,8 @@ def load_embedding_model():
 def load_cross_encoder_model():
     def _get_device_cpu_gpu() -> str:
         if torch.cuda.is_available():
-            # gpu_name = torch.cuda.get_device_name(0)
-            # st.info(f"Using GPU: {gpu_name}")
             return "cuda"
-        # st.info("Using CPU for reranking.")
         return "cpu"
-    # st.info(f"Loading reranking model '{MODEL_RERANKING}'...")
     return CrossEncoder(MODEL_RERANKING, device=_get_device_cpu_gpu())
 
 embedding_model = load_embedding_model()
@@ -49,7 +38,6 @@ reranking_model = load_cross_encoder_model()
 
 def rerank(query, documents):
     BATCH_SIZE = 25
-    # st.info(f"Reranking {len(documents)} documents with model '{MODEL_RERANKING}'...")
     query_document_pairs = [(query, doc) for doc in documents]
     scores = reranking_model.predict(query_document_pairs, batch_size=BATCH_SIZE, apply_softmax=False)
     return list(zip(documents, scores))
@@ -66,12 +54,9 @@ def initialize_qdrant():
     collection_exists = any(col.name == COLLECTION_NAME for col in collections)
 
     if not collection_exists:
-        st.info("Creating collection and indexing movies...")
         create_collection(client, COLLECTION_NAME)
         movies = load_movies()
         index_movies(movies, client, collection_name=COLLECTION_NAME)
-    else:
-        st.info("The movie index already exists.")
 
     return client
 
@@ -85,7 +70,6 @@ def create_collection(client, collection_name=COLLECTION_NAME):
             collection_name=collection_name,
             vectors_config=models.VectorParams(size=MODEL_DIMENSION, distance=models.Distance.COSINE),
         )
-        st.info(f"Collection '{collection_name}' created.")
 
 def index_movies(movies, client, collection_name=COLLECTION_NAME):
     points = []
@@ -102,7 +86,6 @@ def index_movies(movies, client, collection_name=COLLECTION_NAME):
             )
         )
     client.upsert(collection_name=collection_name, points=points)
-    st.info("Data indexed in Qdrant.")
 
 def perform_query_and_rerank(client, query, collection_name=COLLECTION_NAME):
     query_vector = embedding_model.encode(query).tolist()
@@ -144,14 +127,8 @@ Customer's Question: Ask for a movie about {query}
 Your Movie Recommendations (only from the available list):
 """
 
-def query_ollama(prompt, model_name=MODEL_LLM):
-    client = ollama.Client(host="http://localhost:11434")
-    response = client.chat(model_name, messages=[{"role": "user", "content": prompt}])
-    return response["message"]["content"]
-
 @st.cache_data()
 def cached_query_ollama(prompt, model_name=MODEL_LLM, temperature=TEMPERATURE, top_p=TOP_P, max_tokens=MAX_TOKENS):
-    """Version cacheable de query_ollama, utilisant prompt, model_name, temperature, top_p et max_tokens comme clé de cache."""
     client = ollama.Client(host="http://localhost:11434")
     response = client.chat(
         model=model_name,
@@ -164,71 +141,83 @@ def cached_query_ollama(prompt, model_name=MODEL_LLM, temperature=TEMPERATURE, t
     return response["message"]["content"]
 
 def main():
+    st.set_page_config(layout="centered")  # Force le centrage
+    st.title("🎬 Movie Recommendations")
+
     if "qdrant_client" not in st.session_state:
         st.session_state.qdrant_client = initialize_qdrant()
-
     if "results" not in st.session_state:
         st.session_state.results = None
     if "response" not in st.session_state:
         st.session_state.response = None
-    if "prompt" not in st.session_state:
-        st.session_state.prompt = None
     if "do_inference" not in st.session_state:
         st.session_state.do_inference = False
 
-    st.title("Movie Recommendations")
-    # Example queries:
-    #   a wormhole in space
-    #   a serie with drugs
-    query = st.text_input("Ask for a movie about...", "a wormhole in space")
+    # Limite la largeur du contenu
+    st.markdown(
+        """
+        <style>
+            .st-emotion-cache-1v0mbdj {
+                max-width: 800px;
+                margin: 0 auto;
+            }
+            .stButton>button {
+                width: 100%;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    col_inference, col_button = st.columns([1, 1])
-    with col_inference:
-        st.session_state.do_inference = st.checkbox("Inference", value=st.session_state.do_inference)
-    with col_button:
-        st.write("")
-        ask = st.button("Ask")
+    # Barre de recherche et options
+    query = st.text_input(
+        "Ask for a movie about...",
+        "a wormhole in space",
+        placeholder="e.g. a serie with drugs",
+        label_visibility="collapsed",
+    )
+    do_inference = st.checkbox("Inference", value=st.session_state.do_inference, key="inference_checkbox")
+    st.session_state.do_inference = do_inference
 
-    if ask and query:
-        with st.spinner("Searching..."):
-            try:
-                st.session_state.results = perform_query_and_rerank(st.session_state.qdrant_client, query)
-            except Exception as e:
-                st.error(f"Error during reranking: {e}")
-                st.session_state.results = None
-
-        if st.session_state.do_inference and st.session_state.results:
-            context = "\n".join([f"- {r.payload['title']}: {r.payload['plot']}" for r in st.session_state.results])
-            st.session_state.prompt = generate_prompt(context, query)
-            with st.spinner("Generating recommendation..."):
+    # Bouton de recherche
+    if st.button("Search"):
+        st.session_state.response = None  # Reset previous response
+        if query:
+            with st.spinner("Searching..."):
                 try:
-                    st.session_state.response = cached_query_ollama(
-                        st.session_state.prompt,
-                        model_name=MODEL_LLM,
-                        temperature=TEMPERATURE,
-                        top_p=TOP_P,
-                        max_tokens=MAX_TOKENS
-                    )
+                    st.session_state.results = perform_query_and_rerank(st.session_state.qdrant_client, query)
+                    if st.session_state.do_inference and st.session_state.results:
+                        context = "\n".join([f"- {r.payload['title']}: {r.payload['plot']}" for r in st.session_state.results])
+                        st.session_state.prompt = generate_prompt(context, query)
+                        st.session_state.response = cached_query_ollama(
+                            st.session_state.prompt,
+                            model_name=MODEL_LLM,
+                            temperature=TEMPERATURE,
+                            top_p=TOP_P,
+                            max_tokens=MAX_TOKENS
+                        )
                 except Exception as e:
-                    st.error(f"Error during inference: {e}")
-                    st.session_state.response = None
+                    st.error(f"Error: {e}")
 
+    # Résultats
     if st.session_state.results:
-        st.subheader("Movies Found")
+        st.subheader("📽️ Movies Found")
         for result in st.session_state.results:
             payload = result.payload
-            st.markdown(f"**{payload['title']}** ({payload['year']})")
-            # st.markdown(f"**{payload['title']}** ({payload['year']}) — reranked score: `{result.score:.2f}` original score: `{result.score:.2f}`")
-            st.write(payload["plot"])
-            st.divider()    
+            with st.container():
+                st.markdown(f"**{payload['title']}** ({payload['year']})")
+                st.caption(payload["plot"])
+                st.divider()
 
+    # Réponse LLM
     if st.session_state.response:
-        st.subheader("Ollama's Recommendation")
-        st.write(st.session_state.response)
+        st.subheader("🤖 Recommendation")
+        st.markdown(st.session_state.response)
 
-    if st.session_state.prompt:
-        st.subheader("Prompt Sent to Ollama")
-        st.text_area("Here is the prompt sent to Ollama", st.session_state.prompt, height=200)
+    # Détails techniques (masqués par défaut)
+    with st.expander("Technical Details", expanded=False):
+        if hasattr(st.session_state, "prompt") and st.session_state.prompt:
+            st.text_area("Prompt sent to Ollama", st.session_state.prompt, height=150)
 
 if __name__ == "__main__":
     main()
