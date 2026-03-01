@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch, MagicMock
-from rag.main import (
+from rag.main_chroma import (
     load_movies,
     initialize_chromadb,
     generate_embeddings,

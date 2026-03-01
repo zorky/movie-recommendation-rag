@@ -5,6 +5,8 @@ import chromadb
 from chromadb.config import Settings
 import streamlit as st
 
+LLM_MODEL="mistral"
+# LLM_MODEL="llama3.2"
 
 def load_movies(file_path="data/data.json"):
     """Loads movie data from the JSON file."""
@@ -20,7 +22,7 @@ def initialize_chromadb():
 
 def generate_embeddings(model, content):
     """Generates embeddings for a given content."""
-    return model.encode(content, precision="binary")
+    return model.encode(content).tolist() 
 
 
 def index_movies(movies, model, collection):
@@ -136,7 +138,7 @@ def main():
             # Show the loading spinner while the request is being processed
             with st.spinner("Searching..."):
                 # Query Ollama
-                response = query_ollama(prompt, model_name="llama3.2")
+                response = query_ollama(prompt, model_name=LLM_MODEL)
 
             st.subheader("Ollama's Recommendation")
             st.write(response)

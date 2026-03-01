@@ -1,9 +1,9 @@
-# Movie Recommendation System with ChromaDB and Ollama
+# Movie Recommendation System with ChromaDB or Qdrant and Ollama
 
-This project implements a movie recommendation system using ChromaDB for indexing and searching movie data, and Ollama for generating personalized movie recommendations. It leverages machine learning models for generating embeddings and querying relevant results based on user input.
+This project implements a movie recommendation system using ChromaDB or Qdrant for indexing and searching movie data, and Ollama for generating personalized movie recommendations. It leverages machine learning models for generating embeddings and querying relevant results based on user input.
 
 ## Features
-- **Movie Indexing**: Movies are indexed in ChromaDB with embeddings generated using SentenceTransformers.
+- **Movie Indexing**: Movies are indexed in Chroma or Qdrant with embeddings generated using SentenceTransformers.
 - **Search**: Users can search for movies based on a query (e.g., "a wormhole in space").
 - **Movie Recommendations**: Ollama generates personalized movie recommendations based on the search results.
 - **Streamlit UI**: A simple web interface built with Streamlit to interact with the system.
@@ -11,8 +11,8 @@ This project implements a movie recommendation system using ChromaDB for indexin
 ## Prerequisites
 
 - Python 3.12+
-- Poetry (for dependency management)
-- ChromaDB, Sentence-Transformers, Ollama, Streamlit
+- UV (for dependency management)
+- Qdrant or Chroma, Sentence-Transformers, Ollama, Streamlit
 
 ## Installation
 
@@ -23,21 +23,42 @@ git clone https://github.com/dotmobo/movie-recommendation-rag.git
 cd movie-recommendation-rag
 ```
 
-### 2. Install dependencies using Poetry:
+### 2. Activate the virtual environment and install dependencies:
 
 ```bash
-poetry install
+uv venv
+source .venv/bin/activate # or under Win : source .venv/Scripts/activate
 ```
 
-### 3. Activate the virtual environment:
+with GPU torch
 
 ```bash
-poetry shell
+uv sync --extra gpu
+```
+
+with only CPU torch
+
+```bash
+uv sync --extra cpu
 ```
 
 ## Running the Application
 
+With Qdrant and Ollama, launch both
+
+```bash
+docker compose -f qdrant.yml -f ollama.yml up -d
+```
+
 To run the application and start the Streamlit UI:
+
+With Qdrant
+
+```bash
+streamlit run rag/main_qdrant.py
+```
+
+With Chroma
 
 ```bash
 streamlit run rag/main_chroma.py
@@ -59,7 +80,7 @@ This project includes unit tests for the core functions.
 To run the tests, execute:
 
 ```bash
-poetry run pytest
+uv run pytest
 ```
 
 ## License
