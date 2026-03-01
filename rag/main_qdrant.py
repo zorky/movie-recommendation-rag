@@ -8,22 +8,28 @@ import streamlit as st
 import uuid
 import torch
 
-# Configuration
+# Qdrant
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
 COLLECTION_NAME = "movies"
+
+# Embedding and Reranking Models
 MODEL_EMBEDDING = "sentence-transformers/all-MiniLM-L6-v2"
 MODEL_DIMENSION = 384
 MODEL_RERANKING = "BAAI/bge-reranker-v2-m3"
+
+# Ollama
 LLM_API = "http://localhost:11434/v1"
-MODEL_LLM = "mistral"
+LLM_MODEL = "mistral"
 MAX_TOKENS = 500
 TEMPERATURE = 0.3
 TOP_P = 0.9
 
+
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer(MODEL_EMBEDDING)
+
 
 @st.cache_resource
 def load_cross_encoder_model():
@@ -31,21 +37,28 @@ def load_cross_encoder_model():
         if torch.cuda.is_available():
             return "cuda"
         return "cpu"
+
     return CrossEncoder(MODEL_RERANKING, device=_get_device_cpu_gpu())
+
 
 embedding_model = load_embedding_model()
 reranking_model = load_cross_encoder_model()
 
+
 def rerank(query, documents):
     BATCH_SIZE = 25
     query_document_pairs = [(query, doc) for doc in documents]
-    scores = reranking_model.predict(query_document_pairs, batch_size=BATCH_SIZE, apply_softmax=False)
+    scores = reranking_model.predict(
+        query_document_pairs, batch_size=BATCH_SIZE, apply_softmax=False
+    )
     return list(zip(documents, scores))
+
 
 @st.cache_data
 def load_movies(file_path="data/data.json"):
     with open(file_path, "r") as f:
         return json.load(f)
+
 
 @st.cache_resource
 def initialize_qdrant():
@@ -60,16 +73,21 @@ def initialize_qdrant():
 
     return client
 
+
 def generate_uuid(imdb_id):
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, imdb_id))
+
 
 def create_collection(client, collection_name=COLLECTION_NAME):
     existing_collections = [c.name for c in client.get_collections().collections]
     if collection_name not in existing_collections:
         client.create_collection(
             collection_name=collection_name,
-            vectors_config=models.VectorParams(size=MODEL_DIMENSION, distance=models.Distance.COSINE),
+            vectors_config=models.VectorParams(
+                size=MODEL_DIMENSION, distance=models.Distance.COSINE
+            ),
         )
+
 
 def index_movies(movies, client, collection_name=COLLECTION_NAME):
     points = []
@@ -82,14 +100,22 @@ def index_movies(movies, client, collection_name=COLLECTION_NAME):
             models.PointStruct(
                 id=doc_id,
                 vector=embedding_model.encode(content).tolist(),
-                payload={"title": title, "content": content, "year": movie["Year"], "plot": plot},
+                payload={
+                    "title": title,
+                    "content": content,
+                    "year": movie["Year"],
+                    "plot": plot,
+                },
             )
         )
     client.upsert(collection_name=collection_name, points=points)
 
+
 def perform_query_and_rerank(client, query, collection_name=COLLECTION_NAME):
     query_vector = embedding_model.encode(query).tolist()
-    results = client.query_points(collection_name=collection_name, query=query_vector, limit=3)
+    results = client.query_points(
+        collection_name=collection_name, query=query_vector, limit=3
+    )
     points = results.points
 
     if not points:
@@ -114,6 +140,7 @@ def perform_query_and_rerank(client, query, collection_name=COLLECTION_NAME):
 
     return reranked_points
 
+
 def generate_prompt(context, query):
     return f"""
 You are a knowledgeable DVD salesperson with expertise in movies. Your task is to recommend movies to customers, but you can only suggest films that are available in the store's inventory. Make sure your recommendations are based solely on the list of movies provided.
@@ -127,8 +154,15 @@ Customer's Question: Ask for a movie about {query}
 Your Movie Recommendations (only from the available list):
 """
 
+
 @st.cache_data()
-def cached_query_ollama(prompt, model_name=MODEL_LLM, temperature=TEMPERATURE, top_p=TOP_P, max_tokens=MAX_TOKENS):
+def cached_query_ollama(
+    prompt,
+    model_name=LLM_MODEL,
+    temperature=TEMPERATURE,
+    top_p=TOP_P,
+    max_tokens=MAX_TOKENS,
+):
     client = ollama.Client(host="http://localhost:11434")
     response = client.chat(
         model=model_name,
@@ -136,9 +170,10 @@ def cached_query_ollama(prompt, model_name=MODEL_LLM, temperature=TEMPERATURE, t
         options={
             "temperature": temperature,
             "top_p": top_p,
-        }
+        },
     )
     return response["message"]["content"]
+
 
 def main():
     st.set_page_config(layout="centered")  # Force le centrage
@@ -176,7 +211,9 @@ def main():
         placeholder="e.g. a serie with drugs",
         label_visibility="collapsed",
     )
-    do_inference = st.checkbox("Inference", value=st.session_state.do_inference, key="inference_checkbox")
+    do_inference = st.checkbox(
+        "Inference", value=st.session_state.do_inference, key="inference_checkbox"
+    )
     st.session_state.do_inference = do_inference
 
     # Bouton de recherche
@@ -185,16 +222,23 @@ def main():
         if query:
             with st.spinner("Searching..."):
                 try:
-                    st.session_state.results = perform_query_and_rerank(st.session_state.qdrant_client, query)
+                    st.session_state.results = perform_query_and_rerank(
+                        st.session_state.qdrant_client, query
+                    )
                     if st.session_state.do_inference and st.session_state.results:
-                        context = "\n".join([f"- {r.payload['title']}: {r.payload['plot']}" for r in st.session_state.results])
+                        context = "\n".join(
+                            [
+                                f"- {r.payload['title']}: {r.payload['plot']}"
+                                for r in st.session_state.results
+                            ]
+                        )
                         st.session_state.prompt = generate_prompt(context, query)
                         st.session_state.response = cached_query_ollama(
                             st.session_state.prompt,
-                            model_name=MODEL_LLM,
+                            model_name=LLM_MODEL,
                             temperature=TEMPERATURE,
                             top_p=TOP_P,
-                            max_tokens=MAX_TOKENS
+                            max_tokens=MAX_TOKENS,
                         )
                 except Exception as e:
                     st.error(f"Error: {e}")
@@ -218,6 +262,7 @@ def main():
     with st.expander("Technical Details", expanded=False):
         if hasattr(st.session_state, "prompt") and st.session_state.prompt:
             st.text_area("Prompt sent to Ollama", st.session_state.prompt, height=150)
+
 
 if __name__ == "__main__":
     main()
