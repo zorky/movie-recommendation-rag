@@ -3,14 +3,22 @@ from functools import lru_cache
 import json
 import ollama
 from qdrant_client import QdrantClient, models
+import requests
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import streamlit as st
 import uuid
 import torch
 
-# Qdrant
+## Qdrant
+QDRANT_IN_MEMORY = (
+    True  # True : no persistence : in memory, False : persistence on server Qdrant
+)
+
+# Qdrant with server: QDRANT_HOST = "localhost"; QDRANT_PORT = 6333
 QDRANT_HOST = "localhost"
 QDRANT_PORT = 6333
+
+# Qdrant collection name for movies : data.json to be indexed in this collection
 COLLECTION_NAME = "movies"
 
 # Embedding and Reranking Models
@@ -21,6 +29,8 @@ MODEL_RERANKING = "BAAI/bge-reranker-v2-m3"
 # Ollama
 LLM_API = "http://localhost:11434/v1"
 LLM_MODEL = "mistral"
+
+# inference parameters
 MAX_TOKENS = 500
 TEMPERATURE = 0.3
 TOP_P = 0.9
@@ -38,7 +48,9 @@ def load_cross_encoder_model():
             return "cuda"
         return "cpu"
 
-    return CrossEncoder(MODEL_RERANKING, device=_get_device_cpu_gpu())
+    _device = _get_device_cpu_gpu()
+    print(f"Loading CrossEncoder model {MODEL_RERANKING} on device {_device}...")
+    return CrossEncoder(MODEL_RERANKING, device=_device)
 
 
 embedding_model = load_embedding_model()
@@ -62,14 +74,19 @@ def load_movies(file_path="data/data.json"):
 
 @st.cache_resource
 def initialize_qdrant():
-    client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-    collections = client.get_collections().collections
-    collection_exists = any(col.name == COLLECTION_NAME for col in collections)
-
-    if not collection_exists:
+    if QDRANT_IN_MEMORY:
+        client = QdrantClient(":memory:")
         create_collection(client, COLLECTION_NAME)
         movies = load_movies()
         index_movies(movies, client, collection_name=COLLECTION_NAME)
+    else:
+        client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        collections = client.get_collections().collections
+        collection_exists = any(col.name == COLLECTION_NAME for col in collections)
+        if not collection_exists:
+            create_collection(client, COLLECTION_NAME)
+            movies = load_movies()
+            index_movies(movies, client, collection_name=COLLECTION_NAME)
 
     return client
 
@@ -90,6 +107,7 @@ def create_collection(client, collection_name=COLLECTION_NAME):
 
 
 def index_movies(movies, client, collection_name=COLLECTION_NAME):
+    """Indexes movies data/data.json in Qdrant."""
     points = []
     for movie in movies:
         doc_id = generate_uuid(movie["imdbID"])
@@ -105,6 +123,7 @@ def index_movies(movies, client, collection_name=COLLECTION_NAME):
                     "content": content,
                     "year": movie["Year"],
                     "plot": plot,
+                    "poster": movie.get("Poster", ""),
                 },
             )
         )
@@ -112,6 +131,7 @@ def index_movies(movies, client, collection_name=COLLECTION_NAME):
 
 
 def perform_query_and_rerank(client, query, collection_name=COLLECTION_NAME):
+    """Performs a search in Qdrant and returns the reranked results."""
     query_vector = embedding_model.encode(query).tolist()
     results = client.query_points(
         collection_name=collection_name, query=query_vector, limit=3
@@ -170,9 +190,23 @@ def cached_query_ollama(
         options={
             "temperature": temperature,
             "top_p": top_p,
+            "num_predict": max_tokens,
         },
     )
     return response["message"]["content"]
+
+
+@lru_cache(maxsize=128)
+def fetch_image(url: str) -> bytes | None:
+    try:
+        # 403 Forbidden = IMDB bloque les requêtes non-navigateur -> utilisation de m.media-amazon.com
+        url = url.replace("http://ia.media-imdb.com", "https://m.media-amazon.com")
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print(f"fetch_image error for {url}: {e}")  # voir dans le terminal
+        return None
 
 
 def main():
@@ -218,7 +252,7 @@ def main():
 
     # Bouton de recherche
     if st.button("Search"):
-        st.session_state.response = None  # Reset previous response
+        st.session_state.response = None
         if query:
             with st.spinner("Searching..."):
                 try:
@@ -249,8 +283,18 @@ def main():
         for result in st.session_state.results:
             payload = result.payload
             with st.container():
-                st.markdown(f"**{payload['title']}** ({payload['year']})")
-                st.caption(payload["plot"])
+                col_img, col_info = st.columns([1, 3])
+                with col_img:
+                    poster_url = payload.get("poster", "")
+                    if poster_url:
+                        img_bytes = fetch_image(poster_url)
+                        if img_bytes:
+                            st.image(img_bytes, width=100)
+                        else:
+                            st.write("❌ fetch failed")
+                with col_info:
+                    st.markdown(f"**{payload['title']}** ({payload['year']})")
+                    st.caption(payload["plot"])
                 st.divider()
 
     # Réponse LLM

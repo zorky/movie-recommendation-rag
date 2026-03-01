@@ -44,7 +44,15 @@ uv sync --extra cpu
 
 ## Running the Application
 
-With Qdrant and Ollama, launch both
+Qdrant in memory by default (QDRANT_IN_MEMORY=True)
+
+Launch Ollama
+
+```bash
+docker compose -f ollama.yml up -d
+```
+
+With Qdrant server (QDRANT_IN_MEMORY=False) and Ollama, launch both
 
 ```bash
 docker compose -f qdrant.yml -f ollama.yml up -d
