@@ -1,0 +1,43 @@
+services:
+  ollama:
+    container_name: ollama
+    image: ollama/ollama
+    # env_file:
+    #   - .env
+
+    runtime: nvidia # For GPU support, ensure NVIDIA Container Toolkit is installed and configured
+    environment:      
+      NVIDIA_VISIBLE_DEVICES: "all"
+      OLLAMA_KV_CACHE_TYPE: "q4_0"
+      OLLAMA_KEEP_ALIVE: "24h"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_FLASH_ATTENTION: "1"
+    shm_size: 2g
+    healthcheck:
+      test: [ "CMD", "ollama", "list", "||", "exit", "1" ]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+
+    ports:
+     - "11434:11434"
+      # - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+    
+    # mistral is the default model, but you can specify a different one via the LLM_MODEL environment variable in the .env file
+    entrypoint: > 
+      /bin/sh -c "
+      echo '========================================' &&
+      echo 'LLM_MODEL: ${LLM_MODEL:-mistral}' &&
+      echo '========================================' &&
+      ollama serve &       
+      sleep 3 && 
+      echo 'Pulling model ${LLM_MODEL:-mistral}...' &&      
+      ollama pull $${LLM_MODEL:-mistral} && 
+      wait
+      "    
+
+volumes:
+  ollama:

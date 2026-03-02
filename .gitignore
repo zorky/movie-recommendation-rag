@@ -12,3 +12,5 @@ poetry.lock
 
 # IDEs
 .vscode/
+
+.history
